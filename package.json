@@ -1,0 +1,39 @@
+{
+  "name": "metadao-ico-contributor",
+  "private": true,
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "dev": "vite dev"
+  },
+  "keywords": [],
+  "author": "",
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.29.0",
+    "@metadaoproject/futarchy": "^0.6.0-alpha.16",
+    "@solana/spl-token-registry": "^0.2.4574",
+    "@solana/wallet-adapter-phantom": "^0.9.28",
+    "@solana/wallet-adapter-react": "^0.15.39",
+    "@solana/wallet-adapter-react-ui": "^0.9.39",
+    "@solana/wallet-adapter-solflare": "^0.6.32",
+    "@solana/web3.js": "^1.98.4",
+    "bs58": "^6.0.0",
+    "buffer": "^6.0.3",
+    "events": "^3.3.0",
+    "process": "^0.11.10",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.9.6",
+    "react-toastify": "^11.0.5",
+    "stream-browserify": "^3.0.0",
+    "styled-components": "^6.1.19",
+    "util": "^0.12.5"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "typescript": "^5.6.3",
+    "vite": "^7.2.4"
+  }
+}
