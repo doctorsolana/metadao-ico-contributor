@@ -10,7 +10,7 @@
   "author": "",
   "dependencies": {
     "@coral-xyz/anchor": "^0.29.0",
-    "@metadaoproject/futarchy": "^0.6.0-alpha.16",
+    "@metadaoproject/futarchy": "^0.7.0-alpha.6",
     "@solana/spl-token-registry": "^0.2.4574",
     "@solana/wallet-adapter-phantom": "^0.9.28",
     "@solana/wallet-adapter-react": "^0.15.39",

@@ -2,10 +2,11 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useConnection, useWallet } from '@solana/wallet-adapter-react'
 import { AnchorProvider, BN } from '@coral-xyz/anchor'
-import { LaunchpadClient } from '@metadaoproject/futarchy/v0.6'
+import { LaunchpadClient as LaunchpadClientV07 } from '@metadaoproject/futarchy/v0.7'
+import { LaunchpadClient as LaunchpadClientV06 } from '@metadaoproject/futarchy/v0.6'
 import { LaunchpadClient as LaunchpadClientV05 } from '@metadaoproject/futarchy/v0.5'
 import { PublicKey } from '@solana/web3.js'
-import type { LaunchRow, LaunchState } from './types/launch'
+import type { LaunchRow, LaunchState, LaunchVersion } from './types/launch'
 import { formatUsd } from './utils/number'
 import { Buffer } from 'buffer'
 import { toast } from 'react-toastify'
@@ -39,6 +40,18 @@ const stringifyAmount = (value: unknown): string | undefined => {
     return String(value)
   } catch {
     return undefined
+  }
+}
+
+const createLaunchpadClient = (version: LaunchVersion, provider: AnchorProvider) => {
+  switch (version) {
+    case 'v0.7':
+      return LaunchpadClientV07.createClient({ provider })
+    case 'v0.6':
+      return LaunchpadClientV06.createClient({ provider })
+    case 'v0.5':
+    default:
+      return LaunchpadClientV05.createClient({ provider })
   }
 }
 
@@ -96,13 +109,11 @@ export const ContributePanel = () => {
     try {
       setSubmitting(true)
       const provider = new AnchorProvider(connection, wallet as any, {})
-      const client =
-        launch.version === 'v0.5'
-          ? LaunchpadClientV05.createClient({ provider })
-          : LaunchpadClient.createClient({ provider })
+      const client = createLaunchpadClient(launch.version, provider)
       const account = await (client as any).launchpad.account.launch.fetch(
         launchPublicKey,
       )
+      const state = deriveState(account.state as Record<string, unknown>)
       setLaunch((prev) => {
         if (!prev) return prev
         return {
@@ -115,7 +126,8 @@ export const ContributePanel = () => {
             prev.goalAmount,
           acceptedAmount:
             stringifyAmount(account.finalRaiseAmount) ?? prev.acceptedAmount,
-          state: deriveState(account.state as Record<string, unknown>),
+          state,
+          canContribute: state === 'live',
         }
       })
       toast.success('Launch data refreshed')
@@ -127,7 +139,7 @@ export const ContributePanel = () => {
     } finally {
       setSubmitting(false)
     }
-  }, [connection, launchPublicKey, wallet])
+  }, [connection, launchPublicKey, wallet, launch.version])
 
   const refreshMyContribution = useCallback(async () => {
     if (!launchPublicKey || !wallet.publicKey) {
@@ -138,10 +150,7 @@ export const ContributePanel = () => {
     setCheckingContribution(true)
     try {
       const provider = new AnchorProvider(connection, wallet as any, {})
-      const client =
-        launch.version === 'v0.5'
-          ? LaunchpadClientV05.createClient({ provider })
-          : LaunchpadClient.createClient({ provider })
+      const client = createLaunchpadClient(launch.version, provider)
       const programId = client.getProgramId()
       const [fundingRecord] = PublicKey.findProgramAddressSync(
         [
@@ -167,7 +176,7 @@ export const ContributePanel = () => {
     } finally {
       setCheckingContribution(false)
     }
-  }, [connection, launchPublicKey, wallet.publicKey])
+  }, [connection, launchPublicKey, wallet.publicKey, launch.version])
 
   useEffect(() => {
     refreshMyContribution()
@@ -227,6 +236,7 @@ export const ContributePanel = () => {
   }, [refreshQuoteBalance])
 
   const isCompleted = launch.state === 'completed'
+  const canContributeNow = launch.canContribute ?? launch.state === 'live'
   const quoteSymbol = launch.quoteSymbol ?? 'USDC'
   const commitmentLabel = myCommitted ? formatUsd(myCommitted) : '—'
   const balanceLabel =
@@ -239,7 +249,10 @@ export const ContributePanel = () => {
 
   const handleContribute = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (isCompleted) return
+    if (!canContributeNow) {
+      toast.error('This launch is not open for contributions.')
+      return
+    }
 
     if (!wallet.publicKey) {
       toast.error('Connect a wallet to contribute.')
@@ -260,10 +273,7 @@ export const ContributePanel = () => {
     try {
       setSubmitting(true)
       const provider = new AnchorProvider(connection, wallet as any, {})
-      const client =
-        launch.version === 'v0.5'
-          ? LaunchpadClientV05.createClient({ provider })
-          : LaunchpadClient.createClient({ provider })
+      const client = createLaunchpadClient(launch.version, provider)
       const rawAmount = new BN(Math.round(uiAmount * 10 ** quoteDecimals))
       const methods = (client as any).fundIx({
         launch: launchPublicKey,
@@ -306,10 +316,7 @@ export const ContributePanel = () => {
     try {
       setSubmitting(true)
       const provider = new AnchorProvider(connection, wallet as any, {})
-      const client =
-        launch.version === 'v0.5'
-          ? LaunchpadClientV05.createClient({ provider })
-          : LaunchpadClient.createClient({ provider })
+      const client = createLaunchpadClient(launch.version, provider)
       const baseMint = new PublicKey(launch.baseMint)
       const methods = (client as any).claimIx(
         launchPublicKey,
@@ -333,6 +340,15 @@ export const ContributePanel = () => {
     }
   }
 
+  const getStateLabel = () => {
+    if (canContributeNow) return 'Open for contribution'
+    if (isCompleted) return 'Launch completed'
+    if (launch.state === 'closed') return 'Launch closed'
+    if (launch.state === 'initialized') return 'Not yet started'
+    if (launch.state === 'refunding') return 'Refunding'
+    return launch.state
+  }
+
   return (
     <aside className="contribute-panel">
       <header>
@@ -352,15 +368,24 @@ export const ContributePanel = () => {
         </div>
         <div>
           <p className="muted tiny">
-            {isCompleted ? 'Launch completed' : 'Contribute to'}
+            {getStateLabel()}
           </p>
-          <h2>{launch.tokenSymbol ?? launch.tokenName ?? launch.publicKey}</h2>
+          <h2>
+            {launch.tokenSymbol ?? launch.tokenName ?? launch.publicKey}
+            <span className="version-badge" style={{ marginLeft: '0.5rem' }}>{launch.version}</span>
+          </h2>
         </div>
       </header>
 
       {launch.isLikelyTest && (
         <div className="warning-pill" style={{ marginBottom: '0.75rem' }}>
           Likely a test account
+        </div>
+      )}
+
+      {canContributeNow && (
+        <div className="contribute-pill" style={{ marginBottom: '0.75rem' }}>
+          ✓ Open for contributions
         </div>
       )}
 
@@ -394,7 +419,7 @@ export const ContributePanel = () => {
         >
           {submitting ? 'Processing…' : 'Claim tokens'}
         </button>
-      ) : (
+      ) : canContributeNow ? (
         <form className="contribute-form vertical" onSubmit={handleContribute}>
           <label htmlFor="contribute-amount" className="muted tiny">
             Amount ({quoteSymbol})
@@ -407,11 +432,10 @@ export const ContributePanel = () => {
             placeholder="0.00"
             value={amount}
             onChange={(event) => setAmount(event.currentTarget.value)}
-            disabled={isCompleted}
           />
           <small className="muted tiny">
             Balance: {balanceLabel}{' '}
-            {quoteBalance !== null && !isCompleted ? (
+            {quoteBalance !== null ? (
               <button
                 type="button"
                 className="link-button small-link"
@@ -421,10 +445,22 @@ export const ContributePanel = () => {
               </button>
             ) : null}
           </small>
-          <button type="submit" disabled={isCompleted || submitting}>
-            {isCompleted ? 'Launch Complete' : submitting ? 'Submitting…' : 'Contribute'}
+          <button type="submit" disabled={submitting}>
+            {submitting ? 'Submitting…' : 'Contribute'}
           </button>
         </form>
+      ) : (
+        <div className="contribute-closed">
+          <p className="muted">
+            {launch.state === 'initialized'
+              ? 'This launch has not started yet. Check back later.'
+              : launch.state === 'closed'
+              ? 'This launch is closed and awaiting completion.'
+              : launch.state === 'refunding'
+              ? 'This launch is in refunding state. Contributors can claim refunds.'
+              : 'Contributions are not available for this launch.'}
+          </p>
+        </div>
       )}
 
       <pre className="contribute-panel__meta">
@@ -433,4 +469,3 @@ export const ContributePanel = () => {
     </aside>
   )
 }
-

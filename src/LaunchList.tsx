@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { useConnection } from '@solana/wallet-adapter-react'
 import { AnchorProvider } from '@coral-xyz/anchor'
-import { LaunchpadClient } from '@metadaoproject/futarchy/v0.6'
+import { LaunchpadClient as LaunchpadClientV07 } from '@metadaoproject/futarchy/v0.7'
+import { LaunchpadClient as LaunchpadClientV06 } from '@metadaoproject/futarchy/v0.6'
 import { LaunchpadClient as LaunchpadClientV05 } from '@metadaoproject/futarchy/v0.5'
 import type { PublicKey } from '@solana/web3.js'
 import { useNavigate } from 'react-router-dom'
@@ -10,7 +11,7 @@ import {
   type TokenMeta,
 } from './utils/tokenMetadata'
 import { formatUsd } from './utils/number'
-import type { LaunchRow, LaunchState } from './types/launch'
+import type { LaunchRow, LaunchState, LaunchVersion } from './types/launch'
 
 const dummyWallet = {
   publicKey: null,
@@ -108,6 +109,8 @@ const USDC_LAMPORTS = 1_000_000n
 const MIN_GOAL_THRESHOLD = 1_000n * USDC_LAMPORTS
 const MIN_RAISED_THRESHOLD = 100n * USDC_LAMPORTS
 
+type ContributeFilter = 'all' | 'contributable' | 'non-contributable'
+
 export const LaunchList = () => {
   const { connection } = useConnection()
   const navigate = useNavigate()
@@ -115,6 +118,7 @@ export const LaunchList = () => {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [stateFilter, setStateFilter] = useState<LaunchState | 'all'>('all')
+  const [contributeFilter, setContributeFilter] = useState<ContributeFilter>('all')
   const [sortField, setSortField] = useState<'goal' | 'raised'>('raised')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -127,15 +131,20 @@ export const LaunchList = () => {
         setError(null)
 
         const provider = new AnchorProvider(connection, dummyWallet as any, {})
-        const client06 = LaunchpadClient.createClient({ provider })
+        const client07 = LaunchpadClientV07.createClient({ provider })
+        const client06 = LaunchpadClientV06.createClient({ provider })
         const client05 = LaunchpadClientV05.createClient({ provider })
 
-        const [accounts06, accounts05] = await Promise.all([
+        const [accounts07, accounts06, accounts05] = await Promise.all([
+          (client07 as any).launchpad.account.launch.all().catch(() => []),
           (client06 as any).launchpad.account.launch.all().catch(() => []),
           (client05 as any).launchpad.account.launch.all().catch(() => []),
         ])
 
         const mapped: LaunchRow[] = [
+          ...accounts07.map((entry: LaunchAccountEntry) =>
+            mapLaunchEntry(entry, 'v0.7'),
+          ),
           ...accounts06.map((entry: LaunchAccountEntry) =>
             mapLaunchEntry(entry, 'v0.6'),
           ),
@@ -144,9 +153,20 @@ export const LaunchList = () => {
           ),
         ]
 
+        // Deduplicate by publicKey (prefer higher version)
+        const versionPriority: Record<LaunchVersion, number> = { 'v0.7': 3, 'v0.6': 2, 'v0.5': 1 }
+        const deduped = new Map<string, LaunchRow>()
+        for (const row of mapped) {
+          const existing = deduped.get(row.publicKey)
+          if (!existing || versionPriority[row.version] > versionPriority[existing.version]) {
+            deduped.set(row.publicKey, row)
+          }
+        }
+        const uniqueMapped = Array.from(deduped.values())
+
         const mints = Array.from(
           new Set(
-            mapped
+            uniqueMapped
               .flatMap((row) => [row.baseMint, row.quoteMint])
               .filter(Boolean),
           ),
@@ -159,7 +179,7 @@ export const LaunchList = () => {
           metadata = {}
         }
 
-        const enriched = mapped.map((row) => {
+        const enriched = uniqueMapped.map((row) => {
           const baseMeta = metadata[row.baseMint]
           const quoteMeta = metadata[row.quoteMint]
           const raw = row.rawAccount as Record<string, unknown> | undefined
@@ -205,6 +225,8 @@ export const LaunchList = () => {
 
   const filtered = rows.filter((row) => {
     if (stateFilter !== 'all' && row.state !== stateFilter) return false
+    if (contributeFilter === 'contributable' && !row.canContribute) return false
+    if (contributeFilter === 'non-contributable' && row.canContribute) return false
     return true
   })
 
@@ -221,12 +243,14 @@ export const LaunchList = () => {
     return delta > BigInt(0) ? -1 : 1
   })
 
+  const contributableCount = rows.filter((r) => r.canContribute).length
+
   return (
     <section className="launch-list">
       <header className="launch-header">
         <span>Launches</span>
         <span className="muted">
-          {loading ? 'Loading…' : `${filtered.length} shown`}
+          {loading ? 'Loading…' : `${filtered.length} shown · ${contributableCount} open for contribution`}
         </span>
       </header>
 
@@ -245,6 +269,20 @@ export const LaunchList = () => {
             <option value="closed">Closed</option>
             <option value="completed">Completed</option>
             <option value="refunding">Refunding</option>
+          </select>
+        </label>
+
+        <label>
+          Contribution
+          <select
+            value={contributeFilter}
+            onChange={(event) =>
+              setContributeFilter(event.currentTarget.value as ContributeFilter)
+            }
+          >
+            <option value="all">All launches</option>
+            <option value="contributable">Open for contribution</option>
+            <option value="non-contributable">Not open</option>
           </select>
         </label>
 
@@ -284,7 +322,7 @@ export const LaunchList = () => {
           {sorted.map((row) => (
             <article
               key={row.publicKey}
-              className="launch-row"
+              className={`launch-row ${row.canContribute ? 'launch-row--contributable' : ''}`}
               onClick={() => {
                 console.info('[launches] selected', row.publicKey, row.rawAccount)
                 navigate(`/launch/${row.publicKey}`, { state: row })
@@ -306,7 +344,10 @@ export const LaunchList = () => {
                   )}
                 </div>
                 <div>
-                  <div>{row.tokenSymbol?.trim() || row.tokenName?.trim() || shortPk(row.baseMint)}</div>
+                  <div className="launch-title">
+                    {row.tokenSymbol?.trim() || row.tokenName?.trim() || shortPk(row.baseMint)}
+                    <span className="version-badge">{row.version}</span>
+                  </div>
                   <div className="muted tiny">
                     Base {shortPk(row.baseMint)} · Quote {shortPk(row.quoteMint)}
                   </div>
@@ -316,6 +357,14 @@ export const LaunchList = () => {
                 </div>
               </div>
               <div className="badge-row">
+                {row.canContribute && (
+                  <span className="contribute-pill">Open</span>
+                )}
+                {row.secondsRemaining !== undefined && row.secondsRemaining > 0 && (
+                  <span className="time-remaining">
+                    {formatTimeRemaining(row.secondsRemaining)}
+                  </span>
+                )}
                 {row.isLikelyTest && (
                   <span className="warning-pill">Likely a test account</span>
                 )}
@@ -337,9 +386,19 @@ type LaunchAccountEntry = {
   account: LaunchAccount | undefined
 }
 
+const formatTimeRemaining = (seconds: number): string => {
+  if (seconds <= 0) return 'Ended'
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const mins = Math.floor((seconds % 3600) / 60)
+  if (days > 0) return `${days}d ${hours}h left`
+  if (hours > 0) return `${hours}h ${mins}m left`
+  return `${mins}m left`
+}
+
 const mapLaunchEntry = (
   entry: LaunchAccountEntry,
-  version: 'v0.6' | 'v0.5',
+  version: LaunchVersion,
 ): LaunchRow => {
   const account: LaunchAccount = entry.account ?? {}
   const pk: PublicKey | string = entry.publicKey
@@ -365,6 +424,28 @@ const mapLaunchEntry = (
     (goalBig !== null && goalBig < MIN_GOAL_THRESHOLD) ||
     (totalBig !== null && totalBig < MIN_RAISED_THRESHOLD)
 
+  // Calculate if launch can be contributed to
+  const canContribute = state === 'live'
+
+  // Calculate seconds remaining if live
+  let secondsRemaining: number | undefined
+  if (state === 'live') {
+    const unixTimestampStarted = account.unixTimestampStarted
+    const secondsForLaunch = account.secondsForLaunch
+
+    if (unixTimestampStarted && secondsForLaunch) {
+      const startedAt = typeof unixTimestampStarted === 'object' && 'toNumber' in unixTimestampStarted
+        ? unixTimestampStarted.toNumber()
+        : Number(unixTimestampStarted)
+      const duration = typeof secondsForLaunch === 'object' && 'toNumber' in secondsForLaunch
+        ? secondsForLaunch.toNumber()
+        : Number(secondsForLaunch)
+      const endTime = startedAt + duration
+      const now = Math.floor(Date.now() / 1000)
+      secondsRemaining = Math.max(0, endTime - now)
+    }
+  }
+
   return {
     publicKey: typeof pk === 'string' ? pk : pk.toBase58(),
     baseMint,
@@ -375,7 +456,8 @@ const mapLaunchEntry = (
     goalAmount,
     acceptedAmount,
     isLikelyTest,
+    canContribute,
+    secondsRemaining,
     rawAccount: serializeAccount(account) as Record<string, unknown>,
   }
 }
-
