@@ -12,8 +12,8 @@ importers:
         specifier: ^0.29.0
         version: 0.29.0(bufferutil@4.0.9)(typescript@5.9.3)(utf-8-validate@5.0.10)
       '@metadaoproject/futarchy':
-        specifier: ^0.7.0-alpha.6
-        version: 0.7.0-alpha.6(@types/node@24.10.1)(bufferutil@4.0.9)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@5.0.10)
+        specifier: 0.7.0-alpha.11
+        version: 0.7.0-alpha.11(@types/node@24.10.1)(bufferutil@4.0.9)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@5.0.10)
       '@solana/spl-token-registry':
         specifier: ^0.2.4574
         version: 0.2.4574
@@ -716,8 +716,8 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
-  '@metadaoproject/futarchy@0.7.0-alpha.6':
-    resolution: {integrity: sha512-urhtwIwd7dl8rASPToMO+u3YsJkyJRK1Py0KUICFlyHvdxJkxK9MnIyArJS8NS2nRAlr2xAD9eGrV1GUGNp4bw==}
+  '@metadaoproject/futarchy@0.7.0-alpha.11':
+    resolution: {integrity: sha512-ewBL8ZXgKkZQhmdLtWzLzNvBymybALaUu8kzPH96sn1Iz7/HtGvBseRgW3Ljwd/o6lFos9AXYuSShWdVR9fdUg==}
 
   '@metaplex-foundation/beet-solana@0.4.0':
     resolution: {integrity: sha512-B1L94N3ZGMo53b0uOSoznbuM5GBNJ8LwSeznxBxJ+OThvfHQ4B5oMUqb+0zdLRfkKGS7Q6tpHK9P+QK0j3w2cQ==}
@@ -2024,7 +2024,7 @@ packages:
 
   glob@7.2.3:
     resolution: {integrity: sha512-nFR0zLpU2YCaRxwoCJvL6UvCH2JFyFVIvwTLsIf21AuHlMskA1hhTdk+LlYJtOlYt9v6dvszD2BGRqBL+iQK9Q==}
-    deprecated: Glob versions prior to v9 are no longer supported
+    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
   gopd@1.2.0:
     resolution: {integrity: sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==}
@@ -3960,7 +3960,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@metadaoproject/futarchy@0.7.0-alpha.6(@types/node@24.10.1)(bufferutil@4.0.9)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@5.0.10)':
+  '@metadaoproject/futarchy@0.7.0-alpha.11(@types/node@24.10.1)(bufferutil@4.0.9)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@5.0.10)':
     dependencies:
       '@coral-xyz/anchor': 0.29.0(bufferutil@4.0.9)(typescript@5.9.3)(utf-8-validate@5.0.10)
       '@metaplex-foundation/umi': 0.9.2
