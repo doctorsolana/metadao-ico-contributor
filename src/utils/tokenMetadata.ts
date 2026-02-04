@@ -1,15 +1,16 @@
-const getHeliusEndpoint = () => {
-  if (typeof window !== 'undefined' && (window as any).__APP_RPC_ENDPOINT) {
-    return (window as any).__APP_RPC_ENDPOINT as string
-  }
-  return undefined
-}
+const getHeliusEndpoint = () =>
+  typeof window !== 'undefined' ? window.__APP_RPC_ENDPOINT : undefined
+
+const isHeliusEndpoint = (endpoint?: string): endpoint is string =>
+  Boolean(endpoint && endpoint.includes('helius'))
 
 export type TokenMeta = {
   name: string
   symbol: string
   logoURI: string
 }
+
+const emptyTokenMeta = (): TokenMeta => ({ name: '', symbol: '', logoURI: '' })
 
 const KNOWN_TOKEN_DATA: Record<string, TokenMeta> = {
   EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: {
@@ -38,9 +39,9 @@ export async function fetchTokenMetadataBatch(
 
   if (!toFetch.length) return result
   const heliusEndpoint = getHeliusEndpoint()
-  if (!heliusEndpoint || !heliusEndpoint.includes('helius')) {
+  if (!isHeliusEndpoint(heliusEndpoint)) {
     toFetch.forEach((mint) => {
-      result[mint] = { name: '', symbol: '', logoURI: '' }
+      result[mint] = emptyTokenMeta()
     })
     return result
   }
@@ -77,7 +78,7 @@ export async function fetchTokenMetadataBatch(
   } catch (err) {
     console.error('fetchTokenMetadataBatch error:', err)
     toFetch.forEach((mint) => {
-      if (!result[mint]) result[mint] = { name: '', symbol: '', logoURI: '' }
+      if (!result[mint]) result[mint] = emptyTokenMeta()
     })
   }
 
@@ -89,8 +90,8 @@ export async function fetchTokenMetadataSingle(
 ): Promise<TokenMeta> {
   if (KNOWN_TOKEN_DATA[mintAddress]) return KNOWN_TOKEN_DATA[mintAddress]
   const heliusEndpoint = getHeliusEndpoint()
-  if (!heliusEndpoint || !heliusEndpoint.includes('helius')) {
-    return { name: '', symbol: '', logoURI: '' }
+  if (!isHeliusEndpoint(heliusEndpoint)) {
+    return emptyTokenMeta()
   }
   try {
     const response = await fetch(heliusEndpoint, {
@@ -105,7 +106,7 @@ export async function fetchTokenMetadataSingle(
     })
     const { result } = await response.json()
     const content = result?.content
-    if (!content) return { name: '', symbol: '', logoURI: '' }
+    if (!content) return emptyTokenMeta()
 
     let name: string = content?.metadata?.name || ''
     let symbol: string = content?.metadata?.symbol || ''
@@ -124,7 +125,6 @@ export async function fetchTokenMetadataSingle(
     return { name, symbol, logoURI }
   } catch (err) {
     console.error('fetchTokenMetadataSingle error:', err)
-    return { name: '', symbol: '', logoURI: '' }
+    return emptyTokenMeta()
   }
 }
-

@@ -1,59 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useConnection, useWallet } from '@solana/wallet-adapter-react'
+import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import { AnchorProvider, BN } from '@coral-xyz/anchor'
-import { LaunchpadClient as LaunchpadClientV07 } from '@metadaoproject/futarchy/v0.7'
-import { LaunchpadClient as LaunchpadClientV06 } from '@metadaoproject/futarchy/v0.6'
-import { LaunchpadClient as LaunchpadClientV05 } from '@metadaoproject/futarchy/v0.5'
 import { PublicKey } from '@solana/web3.js'
-import type { LaunchRow, LaunchState, LaunchVersion } from './types/launch'
+import type { LaunchRow, LaunchVersion } from './types/launch'
 import { formatUsd } from './utils/number'
 import { Buffer } from 'buffer'
 import { toast } from 'react-toastify'
 import { sendSmartTransaction } from './utils/sendSmartTransaction'
-
-const deriveState = (stateObj?: Record<string, unknown>): LaunchState => {
-  if (!stateObj) return 'unknown'
-  if ('live' in stateObj) return 'live'
-  if ('complete' in stateObj || 'completed' in stateObj) return 'completed'
-  if ('initialized' in stateObj) return 'initialized'
-  if ('closed' in stateObj) return 'closed'
-  if ('refunding' in stateObj) return 'refunding'
-  return 'unknown'
-}
-
-const stringifyAmount = (value: unknown): string | undefined => {
-  if (value == null) return undefined
-  if (typeof value === 'object' && value !== null) {
-    if ('some' in (value as Record<string, unknown>)) {
-      return stringifyAmount((value as Record<string, unknown>).some)
-    }
-    if ('toString' in (value as Record<string, unknown>)) {
-      try {
-        return (value as { toString: () => string }).toString()
-      } catch {
-        return undefined
-      }
-    }
-  }
-  try {
-    return String(value)
-  } catch {
-    return undefined
-  }
-}
-
-const createLaunchpadClient = (version: LaunchVersion, provider: AnchorProvider) => {
-  switch (version) {
-    case 'v0.7':
-      return LaunchpadClientV07.createClient({ provider })
-    case 'v0.6':
-      return LaunchpadClientV06.createClient({ provider })
-    case 'v0.5':
-    default:
-      return LaunchpadClientV05.createClient({ provider })
-  }
-}
+import {
+  createLaunchpadClient,
+  deriveLaunchState,
+  toLamportString,
+} from './utils/launchpad'
 
 export const ContributePanel = () => {
   const navigate = useNavigate()
@@ -66,6 +26,15 @@ export const ContributePanel = () => {
   }, [incomingLaunch])
   const { connection } = useConnection()
   const wallet = useWallet()
+  const { setVisible: setWalletModalVisible } = useWalletModal()
+  const provider = useMemo(
+    () => new AnchorProvider(connection, wallet as any, {}),
+    [connection, wallet],
+  )
+  const getClient = useCallback(
+    (version: LaunchVersion) => createLaunchpadClient(version, provider),
+    [provider],
+  )
 
   const [myCommitted, setMyCommitted] = useState<string | null>(
     launch?.myCommitted ?? null,
@@ -108,24 +77,23 @@ export const ContributePanel = () => {
     if (!launchPublicKey) return
     try {
       setSubmitting(true)
-      const provider = new AnchorProvider(connection, wallet as any, {})
-      const client = createLaunchpadClient(launch.version, provider)
+      const client = getClient(launch.version)
       const account = await (client as any).launchpad.account.launch.fetch(
         launchPublicKey,
       )
-      const state = deriveState(account.state as Record<string, unknown>)
+      const state = deriveLaunchState(account.state as Record<string, unknown>)
       setLaunch((prev) => {
         if (!prev) return prev
         return {
           ...prev,
           totalCommitted:
-            stringifyAmount(account.totalCommittedAmount) ?? prev.totalCommitted,
+            toLamportString(account.totalCommittedAmount) ?? prev.totalCommitted,
           goalAmount:
-            stringifyAmount(account.minimumRaiseAmount) ??
-            stringifyAmount(account.finalRaiseAmount) ??
+            toLamportString(account.minimumRaiseAmount) ??
+            toLamportString(account.finalRaiseAmount) ??
             prev.goalAmount,
           acceptedAmount:
-            stringifyAmount(account.finalRaiseAmount) ?? prev.acceptedAmount,
+            toLamportString(account.finalRaiseAmount) ?? prev.acceptedAmount,
           state,
           canContribute: state === 'live',
         }
@@ -149,8 +117,7 @@ export const ContributePanel = () => {
 
     setCheckingContribution(true)
     try {
-      const provider = new AnchorProvider(connection, wallet as any, {})
-      const client = createLaunchpadClient(launch.version, provider)
+      const client = getClient(launch.version)
       const programId = client.getProgramId()
       const [fundingRecord] = PublicKey.findProgramAddressSync(
         [
@@ -255,7 +222,7 @@ export const ContributePanel = () => {
     }
 
     if (!wallet.publicKey) {
-      toast.error('Connect a wallet to contribute.')
+      setWalletModalVisible(true)
       return
     }
 
@@ -272,8 +239,7 @@ export const ContributePanel = () => {
 
     try {
       setSubmitting(true)
-      const provider = new AnchorProvider(connection, wallet as any, {})
-      const client = createLaunchpadClient(launch.version, provider)
+      const client = getClient(launch.version)
       const rawAmount = new BN(Math.round(uiAmount * 10 ** quoteDecimals))
       const methods = (client as any).fundIx({
         launch: launchPublicKey,
@@ -315,8 +281,7 @@ export const ContributePanel = () => {
 
     try {
       setSubmitting(true)
-      const provider = new AnchorProvider(connection, wallet as any, {})
-      const client = createLaunchpadClient(launch.version, provider)
+      const client = getClient(launch.version)
       const baseMint = new PublicKey(launch.baseMint)
       const methods = (client as any).claimIx(
         launchPublicKey,

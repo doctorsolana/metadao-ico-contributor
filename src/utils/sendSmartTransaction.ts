@@ -36,6 +36,32 @@ function getErrorLogs(error: unknown): string[] | null {
   return null
 }
 
+const cleanProgramLog = (log: string) =>
+  log.replace(/^Program log:\s*/, '').replace(/^Error:\s*/, '')
+
+function parseErrorMessage(logs: string[], fallback: string): string {
+  if (!logs.length) return fallback
+  try {
+    const parsed = AnchorError.parse(logs as any)
+    if (parsed) {
+      const match = parsed.message.match(/Error Message:\s*(.*)$/)
+      return match ? match[1] : parsed.message
+    }
+  } catch {}
+
+  const splErrors = logs.filter(
+    (l) => l.startsWith('Transfer:') || l.includes('Error: insufficient funds'),
+  )
+  if (splErrors.length) {
+    return splErrors.map(cleanProgramLog).join('\n')
+  }
+
+  const generic = logs.filter((l) => !l.startsWith('Program '))
+  if (generic.length) return generic.join('\n')
+
+  return fallback
+}
+
 export async function sendSmartTransaction(
   connection: Connection,
   wallet: WalletContextState,
@@ -129,29 +155,10 @@ export async function sendSmartTransaction(
           simulation.value.err,
         )
         const logs = simulation.value.logs ?? []
-        let message =
-          (simulation.value.err as any)?.message || 'Simulation failed'
-        try {
-          const parsed = AnchorError.parse(logs as any)
-          if (parsed) {
-            const m = parsed.message.match(/Error Message:\s*(.*)$/)
-            message = m ? m[1] : parsed.message
-          } else {
-            const splErrs = logs.filter(
-              (l) =>
-                l.startsWith('Transfer:') || l.includes('Error: insufficient funds'),
-            )
-            if (splErrs.length) {
-              const cleaned = splErrs.map((l) =>
-                l.replace(/^Program log:\s*/, '').replace(/^Error:\s*/, ''),
-              )
-              message = cleaned.join('\n')
-            } else {
-              const generic = logs.filter((l) => !l.startsWith('Program '))
-              if (generic.length) message = generic.join('\n')
-            }
-          }
-        } catch {}
+        const message = parseErrorMessage(
+          logs,
+          (simulation.value.err as any)?.message || 'Simulation failed',
+        )
         const e = new Error(message)
         ;(e as any).logs = logs
         throw e
@@ -223,28 +230,10 @@ export async function sendSmartTransaction(
     }
     console.error('[sendSmartTransaction] SendTransaction Error:', err)
 
-    let message = (err as any)?.message || 'Transaction failed'
-    try {
-      const parsed = AnchorError.parse(logs as any)
-      if (parsed) {
-        const m = parsed.message.match(/Error Message:\s*(.*)$/)
-        message = m ? m[1] : parsed.message
-      } else if (logs.length) {
-        const splErrs = logs.filter(
-          (l) =>
-            l.startsWith('Transfer:') || l.includes('Error: insufficient funds'),
-        )
-        if (splErrs.length) {
-          const cleaned = splErrs.map((l) =>
-            l.replace(/^Program log:\s*/, '').replace(/^Error:\s*/, ''),
-          )
-          message = cleaned.join('\n')
-        } else {
-          const generic = logs.filter((l) => !l.startsWith('Program '))
-          if (generic.length) message = generic.join('\n')
-        }
-      }
-    } catch {}
+    const message = parseErrorMessage(
+      logs,
+      (err as any)?.message || 'Transaction failed',
+    )
     const e = new Error(message)
     ;(e as any).logs = logs
     ;(e as any).originalError = err
@@ -270,4 +259,3 @@ export async function sendSmartTransaction(
   console.log('[sendSmartTransaction] Finished successfully. Tx ID:', txId)
   return txId
 }
-

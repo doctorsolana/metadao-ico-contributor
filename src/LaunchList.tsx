@@ -1,9 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useConnection } from '@solana/wallet-adapter-react'
 import { AnchorProvider } from '@coral-xyz/anchor'
-import { LaunchpadClient as LaunchpadClientV07 } from '@metadaoproject/futarchy/v0.7'
-import { LaunchpadClient as LaunchpadClientV06 } from '@metadaoproject/futarchy/v0.6'
-import { LaunchpadClient as LaunchpadClientV05 } from '@metadaoproject/futarchy/v0.5'
 import type { PublicKey } from '@solana/web3.js'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -12,6 +9,13 @@ import {
 } from './utils/tokenMetadata'
 import { formatUsd } from './utils/number'
 import type { LaunchRow, LaunchState, LaunchVersion } from './types/launch'
+import {
+  createLaunchpadClients,
+  deriveLaunchState,
+  serializeAccount,
+  toBigIntSafe,
+  toLamportString,
+} from './utils/launchpad'
 
 const dummyWallet = {
   publicKey: null,
@@ -22,92 +26,14 @@ const dummyWallet = {
 const shortPk = (value: string) =>
   value.length <= 10 ? value : `${value.slice(0, 4)}...${value.slice(-4)}`
 
-const deriveState = (stateObj?: Record<string, unknown>): LaunchState => {
-  if (!stateObj) return 'unknown'
-  if ('live' in stateObj) return 'live'
-  if ('complete' in stateObj || 'completed' in stateObj) return 'completed'
-  if ('initialized' in stateObj) return 'initialized'
-  if ('closed' in stateObj) return 'closed'
-  if ('refunding' in stateObj) return 'refunding'
-  return 'unknown'
-}
-
-const serializeAccount = (value: unknown): unknown => {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  ) {
-    return value
-  }
-
-  if (typeof value === 'bigint') {
-    return value.toString()
-  }
-
-  if (value && typeof (value as { toBase58?: () => string }).toBase58 === 'function') {
-    return (value as { toBase58: () => string }).toBase58()
-  }
-
-  if (
-    value &&
-    typeof (value as { toString?: () => string }).toString === 'function' &&
-    (value as { toString: () => string }).toString() !== '[object Object]'
-  ) {
-    return (value as { toString: () => string }).toString()
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => serializeAccount(item))
-  }
-
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, val]) => [
-        key,
-        serializeAccount(val),
-      ]),
-    )
-  }
-
-  return value
-}
-
-const toLamportString = (value: unknown): string | undefined => {
-  if (value == null) return undefined
-  if (typeof value === 'object') {
-    const maybeOption = (value as Record<string, unknown>).some
-    if (maybeOption !== undefined) {
-      return toLamportString(maybeOption)
-    }
-    if ('toString' in (value as Record<string, unknown>)) {
-      try {
-        return (value as { toString: () => string }).toString()
-      } catch {
-        return undefined
-      }
-    }
-  }
-  try {
-    return String(value)
-  } catch {
-    return undefined
-  }
-}
-
-const toBigInt = (value?: string): bigint | null => {
-  if (!value) return null
-  try {
-    return BigInt(value)
-  } catch {
-    return null
-  }
-}
-
 const USDC_LAMPORTS = 1_000_000n
 const MIN_GOAL_THRESHOLD = 1_000n * USDC_LAMPORTS
 const MIN_RAISED_THRESHOLD = 100n * USDC_LAMPORTS
+const VERSION_PRIORITY: Record<LaunchVersion, number> = {
+  'v0.7': 3,
+  'v0.6': 2,
+  'v0.5': 1,
+}
 
 type ContributeFilter = 'all' | 'contributable' | 'non-contributable'
 
@@ -131,34 +57,29 @@ export const LaunchList = () => {
         setError(null)
 
         const provider = new AnchorProvider(connection, dummyWallet as any, {})
-        const client07 = LaunchpadClientV07.createClient({ provider })
-        const client06 = LaunchpadClientV06.createClient({ provider })
-        const client05 = LaunchpadClientV05.createClient({ provider })
+        const clients = createLaunchpadClients(provider)
 
-        const [accounts07, accounts06, accounts05] = await Promise.all([
-          (client07 as any).launchpad.account.launch.all().catch(() => []),
-          (client06 as any).launchpad.account.launch.all().catch(() => []),
-          (client05 as any).launchpad.account.launch.all().catch(() => []),
-        ])
-
-        const mapped: LaunchRow[] = [
-          ...accounts07.map((entry: LaunchAccountEntry) =>
-            mapLaunchEntry(entry, 'v0.7'),
-          ),
-          ...accounts06.map((entry: LaunchAccountEntry) =>
-            mapLaunchEntry(entry, 'v0.6'),
-          ),
-          ...accounts05.map((entry: LaunchAccountEntry) =>
-            mapLaunchEntry(entry, 'v0.5'),
-          ),
-        ]
+        const mapped: LaunchRow[] = (
+          await Promise.all(
+            clients.map(async ({ client, version }) => {
+              const accounts = await (client as any).launchpad.account.launch
+                .all()
+                .catch(() => [])
+              return accounts.map((entry: LaunchAccountEntry) =>
+                mapLaunchEntry(entry, version),
+              )
+            }),
+          )
+        ).flat()
 
         // Deduplicate by publicKey (prefer higher version)
-        const versionPriority: Record<LaunchVersion, number> = { 'v0.7': 3, 'v0.6': 2, 'v0.5': 1 }
         const deduped = new Map<string, LaunchRow>()
         for (const row of mapped) {
           const existing = deduped.get(row.publicKey)
-          if (!existing || versionPriority[row.version] > versionPriority[existing.version]) {
+          if (
+            !existing ||
+            VERSION_PRIORITY[row.version] > VERSION_PRIORITY[existing.version]
+          ) {
             deduped.set(row.publicKey, row)
           }
         }
@@ -411,15 +332,15 @@ const mapLaunchEntry = (
     account.usdcMint?.toBase58?.() ??
     String(account.quoteMint ?? account.usdcMint ?? '')
 
-  const state = deriveState(account.state as Record<string, unknown>)
+  const state = deriveLaunchState(account.state as Record<string, unknown>)
   const totalCommitted = toLamportString(account.totalCommittedAmount)
   const goalAmount =
     toLamportString(account.minimumRaiseAmount) ??
     toLamportString(account.finalRaiseAmount)
   const acceptedAmount = toLamportString(account.finalRaiseAmount)
 
-  const goalBig = toBigInt(goalAmount)
-  const totalBig = toBigInt(totalCommitted)
+  const goalBig = toBigIntSafe(goalAmount)
+  const totalBig = toBigIntSafe(totalCommitted)
   const isLikelyTest =
     (goalBig !== null && goalBig < MIN_GOAL_THRESHOLD) ||
     (totalBig !== null && totalBig < MIN_RAISED_THRESHOLD)
