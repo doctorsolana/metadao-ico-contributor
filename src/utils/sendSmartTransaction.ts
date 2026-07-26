@@ -24,6 +24,10 @@ export interface SendTransactionOptions {
   label?: string
 }
 
+const debug = (...args: unknown[]) => {
+  if (import.meta.env.DEV) console.debug(...args)
+}
+
 function getErrorLogs(error: unknown): string[] | null {
   if (
     error &&
@@ -68,25 +72,25 @@ export async function sendSmartTransaction(
   instructions: TransactionInstruction | TransactionInstruction[],
   opts: SendTransactionOptions = {},
 ): Promise<string> {
-  console.log('[sendSmartTransaction] Starting...')
+  debug('[sendSmartTransaction] Starting...')
 
   if (!wallet.publicKey || !wallet.signTransaction) {
     throw new Error('Wallet not connected or does not support signTransaction')
   }
 
   const {
-    confirmation = 'processed',
+    confirmation = 'confirmed',
     lookupTable = [],
     priorityFee = 50_000,
     computeUnitLimitMargin = 1.1,
     computeUnits,
-    blockhashCommitment = 'processed',
+    blockhashCommitment = 'confirmed',
   } = opts
 
   const list = Array.isArray(instructions) ? instructions : [instructions]
   const resolvedInstructions = await Promise.all(list)
 
-  console.log('[sendSmartTransaction] Instructions:', resolvedInstructions)
+  debug('[sendSmartTransaction] Instructions:', resolvedInstructions)
 
   const lookupTables = (
     await Promise.all(
@@ -97,10 +101,10 @@ export async function sendSmartTransaction(
     )
   ).filter(Boolean) as AddressLookupTableAccount[]
 
-  console.log('[sendSmartTransaction] Lookup Tables:', lookupTables)
+  debug('[sendSmartTransaction] Lookup Tables:', lookupTables)
 
   const buildTransaction = (units: number, recentBlockhash: string) => {
-    console.log('[sendSmartTransaction] Building transaction...')
+    debug('[sendSmartTransaction] Building transaction...')
     const message = new TransactionMessage({
       payerKey: wallet.publicKey!,
       recentBlockhash,
@@ -118,13 +122,13 @@ export async function sendSmartTransaction(
     }).compileToV0Message(lookupTables)
 
     const versionedTx = new VersionedTransaction(message)
-    console.log('[sendSmartTransaction] Built Versioned Transaction:', versionedTx)
+    debug('[sendSmartTransaction] Built Versioned Transaction:', versionedTx)
     return versionedTx
   }
 
   let finalComputeUnits = computeUnits
   if (!finalComputeUnits) {
-    console.log(
+    debug(
       '[sendSmartTransaction] Simulating transaction for compute units...',
     )
     const { blockhash: placeholderBlockhash } =
@@ -136,14 +140,14 @@ export async function sendSmartTransaction(
         replaceRecentBlockhash: true,
         sigVerify: false,
       })
-      console.log('[sendSmartTransaction] Simulation result:', simulation)
+      debug('[sendSmartTransaction] Simulation result:', simulation)
 
-      if (simulation.value.logs?.length) {
+      if (import.meta.env.DEV && simulation.value.logs?.length) {
         const groupLabel = `[Simulation logs]${opts.label ? ` ${opts.label}` : ''}`
         try {
           console.groupCollapsed(groupLabel)
         } catch {}
-        simulation.value.logs.forEach((l) => console.log(l))
+        simulation.value.logs.forEach((log) => console.debug(log))
         try {
           console.groupEnd()
         } catch {}
@@ -173,7 +177,7 @@ export async function sendSmartTransaction(
       finalComputeUnits = Math.floor(
         simulation.value.unitsConsumed * computeUnitLimitMargin,
       )
-      console.log('[sendSmartTransaction] Final Compute Units:', finalComputeUnits)
+      debug('[sendSmartTransaction] Final Compute Units:', finalComputeUnits)
     } catch (err) {
       console.error('[sendSmartTransaction] Simulation failed:', err)
       throw err
@@ -191,9 +195,9 @@ export async function sendSmartTransaction(
   let txId: string
   let signedTx: VersionedTransaction
   try {
-    console.log('[sendSmartTransaction] Signing transaction...')
+    debug('[sendSmartTransaction] Signing transaction...')
     signedTx = await wallet.signTransaction(finalTx)
-    console.log('[sendSmartTransaction] Signed transaction:', signedTx)
+    debug('[sendSmartTransaction] Signed transaction:', signedTx)
   } catch (err) {
     console.error('[sendSmartTransaction] SignTransaction Error:', err)
     const name = (err as any)?.name || ''
@@ -214,12 +218,12 @@ export async function sendSmartTransaction(
   }
 
   try {
-    console.log('[sendSmartTransaction] Sending transaction...')
+    debug('[sendSmartTransaction] Sending transaction...')
     txId = await connection.sendTransaction(signedTx, {
       skipPreflight: true,
       preflightCommitment: blockhashCommitment,
     })
-    console.log('[sendSmartTransaction] Sent Tx ID:', txId)
+    debug('[sendSmartTransaction] Sent Tx ID:', txId)
   } catch (err) {
     const logs = getErrorLogs(err) ?? []
     if (logs.length) {
@@ -242,20 +246,44 @@ export async function sendSmartTransaction(
 
   if (confirmation) {
     try {
-      console.log('[sendSmartTransaction] Confirming transaction...')
+      debug('[sendSmartTransaction] Confirming transaction...')
       const strategy: TransactionConfirmationStrategy = {
         blockhash: latestBlockhashInfo.blockhash,
         lastValidBlockHeight: latestBlockhashInfo.lastValidBlockHeight,
         signature: txId,
       }
-      await connection.confirmTransaction(strategy, confirmation)
-      console.log('[sendSmartTransaction] Transaction confirmed.')
+      const result = await connection.confirmTransaction(strategy, confirmation)
+      // confirmTransaction resolves normally for transactions that landed but
+      // FAILED on-chain (we send with skipPreflight) — value.err carries it.
+      // Without this check a failed contribution would toast as success.
+      if (result.value.err) {
+        const e = new Error(
+          `Transaction ${txId} landed on-chain but failed: ${JSON.stringify(
+            result.value.err,
+          )}. No funds moved; only the network fee was spent.`,
+        )
+        ;(e as any).signature = txId
+        ;(e as any).txError = result.value.err
+        throw e
+      }
+      debug('[sendSmartTransaction] Transaction confirmed.')
     } catch (err) {
+      if ((err as any)?.txError) {
+        throw err
+      }
+      // The transaction is already broadcast at this point — a confirmation
+      // failure must not read as "nothing happened" or the user may resubmit
+      // and pay twice. Surface the signature so callers can say so.
       console.error('[sendSmartTransaction] Confirmation Error:', err)
-      throw err
+      const e = new Error(
+        `Transaction was sent but confirmation did not complete. It may still succeed on-chain — check signature ${txId} in an explorer before retrying.`,
+      )
+      ;(e as any).signature = txId
+      ;(e as any).originalError = err
+      throw e
     }
   }
 
-  console.log('[sendSmartTransaction] Finished successfully. Tx ID:', txId)
+  debug('[sendSmartTransaction] Finished successfully. Tx ID:', txId)
   return txId
 }

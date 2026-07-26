@@ -1,6 +1,3 @@
-const getHeliusEndpoint = () =>
-  typeof window !== 'undefined' ? window.__APP_RPC_ENDPOINT : undefined
-
 const isHeliusEndpoint = (endpoint?: string): endpoint is string =>
   Boolean(endpoint && endpoint.includes('helius'))
 
@@ -11,9 +8,28 @@ export type TokenMeta = {
 }
 
 const emptyTokenMeta = (): TokenMeta => ({ name: '', symbol: '', logoURI: '' })
+const tokenMetadataCache = new Map<string, TokenMeta>()
+
+export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+
+/**
+ * Logo URLs come from token metadata, i.e. arbitrary third parties. Only allow
+ * https and inline data-image URLs so a malformed scheme can't slip into src.
+ */
+export const safeLogoURI = (uri?: string): string | undefined => {
+  if (!uri) return undefined
+  try {
+    const parsed = new URL(uri)
+    if (parsed.protocol === 'https:') return uri
+    if (parsed.protocol === 'data:' && uri.startsWith('data:image/')) return uri
+  } catch {
+    return undefined
+  }
+  return undefined
+}
 
 const KNOWN_TOKEN_DATA: Record<string, TokenMeta> = {
-  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: {
+  [USDC_MINT]: {
     name: 'USD Coin',
     symbol: 'USDC',
     logoURI:
@@ -23,6 +39,7 @@ const KNOWN_TOKEN_DATA: Record<string, TokenMeta> = {
 
 export async function fetchTokenMetadataBatch(
   mints: string[],
+  endpoint: string,
 ): Promise<Record<string, TokenMeta>> {
   const unique = Array.from(new Set(mints)).filter(Boolean)
   const result: Record<string, TokenMeta> = {}
@@ -30,16 +47,16 @@ export async function fetchTokenMetadataBatch(
 
   for (const mint of unique) {
     const preset = KNOWN_TOKEN_DATA[mint]
-    if (preset) {
-      result[mint] = preset
+    const cached = tokenMetadataCache.get(mint)
+    if (preset || cached) {
+      result[mint] = preset ?? cached!
     } else {
       toFetch.push(mint)
     }
   }
 
   if (!toFetch.length) return result
-  const heliusEndpoint = getHeliusEndpoint()
-  if (!isHeliusEndpoint(heliusEndpoint)) {
+  if (!isHeliusEndpoint(endpoint)) {
     toFetch.forEach((mint) => {
       result[mint] = emptyTokenMeta()
     })
@@ -47,7 +64,7 @@ export async function fetchTokenMetadataBatch(
   }
 
   try {
-    const response = await fetch(heliusEndpoint, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -60,20 +77,29 @@ export async function fetchTokenMetadataBatch(
         },
       }),
     })
-    const { result: heliusResult } = await response.json()
+    if (!response.ok) {
+      throw new Error(`Metadata request failed with ${response.status}`)
+    }
 
-    for (const asset of heliusResult || []) {
+    const payload = await response.json()
+    if (payload.error) {
+      throw new Error(payload.error.message ?? 'Metadata RPC request failed')
+    }
+
+    for (const asset of payload.result || []) {
       const mint = asset?.id
       if (!mint) continue
       const content = asset.content
       const metadata = content?.metadata
       const links = content?.links
 
-      result[mint] = {
+      const metadataResult = {
         name: metadata?.name || '',
         symbol: metadata?.symbol || '',
         logoURI: links?.image || '',
       }
+      result[mint] = metadataResult
+      tokenMetadataCache.set(mint, metadataResult)
     }
   } catch (err) {
     console.error('fetchTokenMetadataBatch error:', err)
@@ -83,48 +109,4 @@ export async function fetchTokenMetadataBatch(
   }
 
   return result
-}
-
-export async function fetchTokenMetadataSingle(
-  mintAddress: string,
-): Promise<TokenMeta> {
-  if (KNOWN_TOKEN_DATA[mintAddress]) return KNOWN_TOKEN_DATA[mintAddress]
-  const heliusEndpoint = getHeliusEndpoint()
-  if (!isHeliusEndpoint(heliusEndpoint)) {
-    return emptyTokenMeta()
-  }
-  try {
-    const response = await fetch(heliusEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 'token-single',
-        method: 'getAsset',
-        params: { id: mintAddress, displayOptions: { showFungible: true } },
-      }),
-    })
-    const { result } = await response.json()
-    const content = result?.content
-    if (!content) return emptyTokenMeta()
-
-    let name: string = content?.metadata?.name || ''
-    let symbol: string = content?.metadata?.symbol || ''
-    let logoURI: string = content?.links?.image || ''
-
-    const jsonUri: string | undefined = content?.json_uri
-    if (!logoURI && jsonUri) {
-      try {
-        const metaResp = await fetch(jsonUri)
-        const meta = await metaResp.json()
-        if (meta?.image) logoURI = meta.image
-        if (!name && meta?.name) name = meta.name
-        if (!symbol && meta?.symbol) symbol = meta.symbol
-      } catch {}
-    }
-    return { name, symbol, logoURI }
-  } catch (err) {
-    console.error('fetchTokenMetadataSingle error:', err)
-    return emptyTokenMeta()
-  }
 }

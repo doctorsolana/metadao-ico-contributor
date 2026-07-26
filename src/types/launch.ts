@@ -22,12 +22,8 @@ export interface LaunchRow {
   logoURI?: string
   myCommitted?: string
   quoteSymbol?: string
-  quoteLogoURI?: string
   isLikelyTest?: boolean
   rawAccount?: Record<string, unknown>
-  /** Whether the user can contribute to this launch (state is 'live') */
-  canContribute?: boolean
-  /** Seconds remaining until launch closes (only when live) */
-  secondsRemaining?: number
+  /** Unix timestamp when contributions close, when available. */
+  launchEndTimestamp?: number
 }
-

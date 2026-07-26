@@ -1,41 +1,29 @@
-import React, { useEffect, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { useConnection } from '@solana/wallet-adapter-react'
-import { AnchorProvider } from '@coral-xyz/anchor'
-import type { PublicKey } from '@solana/web3.js'
 import { useNavigate } from 'react-router-dom'
-import {
-  fetchTokenMetadataBatch,
-  type TokenMeta,
-} from './utils/tokenMetadata'
-import { formatUsd } from './utils/number'
-import type { LaunchRow, LaunchState, LaunchVersion } from './types/launch'
+import { safeLogoURI } from './utils/tokenMetadata'
+import { formatUsd, raisePercent } from './utils/number'
+import type { LaunchRow, LaunchState } from './types/launch'
 import {
   createLaunchpadClients,
-  deriveLaunchState,
-  serializeAccount,
+  createReadOnlyProvider,
+  enrichLaunchRows,
+  fetchAllLaunches,
+  isLaunchContributable,
+  mapLaunchEntry,
+  shortPk,
   toBigIntSafe,
-  toLamportString,
 } from './utils/launchpad'
 
-const dummyWallet = {
-  publicKey: null,
-  signTransaction: async (tx: unknown) => tx,
-  signAllTransactions: async (txs: unknown[]) => txs,
-}
-
-const shortPk = (value: string) =>
-  value.length <= 10 ? value : `${value.slice(0, 4)}...${value.slice(-4)}`
-
-const USDC_LAMPORTS = 1_000_000n
-const MIN_GOAL_THRESHOLD = 1_000n * USDC_LAMPORTS
-const MIN_RAISED_THRESHOLD = 100n * USDC_LAMPORTS
-const VERSION_PRIORITY: Record<LaunchVersion, number> = {
+const PAGE_SIZE = 50
+const VERSION_PRIORITY: Record<LaunchRow['version'], number> = {
   'v0.7': 3,
   'v0.6': 2,
   'v0.5': 1,
 }
 
 type ContributeFilter = 'all' | 'contributable' | 'non-contributable'
+type SortOption = 'raised-desc' | 'raised-asc' | 'goal-desc' | 'goal-asc'
 
 export const LaunchList = () => {
   const { connection } = useConnection()
@@ -43,10 +31,22 @@ export const LaunchList = () => {
   const [rows, setRows] = useState<LaunchRow[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [reloadNonce, setReloadNonce] = useState(0)
   const [stateFilter, setStateFilter] = useState<LaunchState | 'all'>('all')
-  const [contributeFilter, setContributeFilter] = useState<ContributeFilter>('all')
-  const [sortField, setSortField] = useState<'goal' | 'raised'>('raised')
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [contributeFilter, setContributeFilter] =
+    useState<ContributeFilter>('all')
+  const [sort, setSort] = useState<SortOption>('raised-desc')
+  const [search, setSearch] = useState('')
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
+  const [now, setNow] = useState(() => Date.now() / 1000)
+  const deferredSearch = useDeferredValue(search.trim().toLowerCase())
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNow(Date.now() / 1000)
+    }, 30_000)
+    return () => window.clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -56,21 +56,31 @@ export const LaunchList = () => {
         setLoading(true)
         setError(null)
 
-        const provider = new AnchorProvider(connection, dummyWallet as any, {})
+        const provider = createReadOnlyProvider(connection)
         const clients = createLaunchpadClients(provider)
+        let successfulClientCount = 0
 
         const mapped: LaunchRow[] = (
           await Promise.all(
             clients.map(async ({ client, version }) => {
-              const accounts = await (client as any).launchpad.account.launch
-                .all()
-                .catch(() => [])
-              return accounts.map((entry: LaunchAccountEntry) =>
-                mapLaunchEntry(entry, version),
-              )
+              try {
+                const accounts = await fetchAllLaunches(client)
+                successfulClientCount += 1
+                return accounts.map((entry) => mapLaunchEntry(entry, version))
+              } catch (clientError) {
+                console.warn(
+                  `[launches] unable to load ${version}`,
+                  clientError,
+                )
+                return []
+              }
             }),
           )
         ).flat()
+
+        if (successfulClientCount === 0) {
+          throw new Error('All launch account requests failed')
+        }
 
         // Deduplicate by publicKey (prefer higher version)
         const deduped = new Map<string, LaunchRow>()
@@ -83,45 +93,11 @@ export const LaunchList = () => {
             deduped.set(row.publicKey, row)
           }
         }
-        const uniqueMapped = Array.from(deduped.values())
 
-        const mints = Array.from(
-          new Set(
-            uniqueMapped
-              .flatMap((row) => [row.baseMint, row.quoteMint])
-              .filter(Boolean),
-          ),
+        const enriched = await enrichLaunchRows(
+          Array.from(deduped.values()),
+          connection.rpcEndpoint,
         )
-
-        let metadata: Record<string, TokenMeta> = {}
-        try {
-          metadata = await fetchTokenMetadataBatch(mints)
-        } catch {
-          metadata = {}
-        }
-
-        const enriched = uniqueMapped.map((row) => {
-          const baseMeta = metadata[row.baseMint]
-          const quoteMeta = metadata[row.quoteMint]
-          const raw = row.rawAccount as Record<string, unknown> | undefined
-          const fallbackName =
-            typeof raw?.['tokenName'] === 'string'
-              ? (raw['tokenName'] as string)
-              : undefined
-          const fallbackSymbol =
-            typeof raw?.['tokenSymbol'] === 'string'
-              ? (raw['tokenSymbol'] as string)
-              : undefined
-
-          return {
-            ...row,
-            tokenName: baseMeta?.name ?? fallbackName,
-            tokenSymbol: baseMeta?.symbol ?? fallbackSymbol,
-            logoURI: baseMeta?.logoURI,
-            quoteSymbol: quoteMeta?.symbol ?? 'USDC',
-            quoteLogoURI: quoteMeta?.logoURI,
-          }
-        })
 
         if (!cancelled) {
           setRows(enriched)
@@ -142,40 +118,99 @@ export const LaunchList = () => {
     return () => {
       cancelled = true
     }
-  }, [connection])
+  }, [connection, reloadNonce])
 
-  const filtered = rows.filter((row) => {
-    if (stateFilter !== 'all' && row.state !== stateFilter) return false
-    if (contributeFilter === 'contributable' && !row.canContribute) return false
-    if (contributeFilter === 'non-contributable' && row.canContribute) return false
-    return true
-  })
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE)
+  }, [contributeFilter, deferredSearch, sort, stateFilter])
 
-  const sorted = [...filtered].sort((a, b) => {
-    const getValue = (row: LaunchRow) => {
-      if (sortField === 'goal') return row.goalAmount ? BigInt(row.goalAmount) : BigInt(0)
-      return row.totalCommitted ? BigInt(row.totalCommitted) : BigInt(0)
+  const sorted = useMemo(() => {
+    const [sortField, sortDir] = sort.split('-') as [
+      'raised' | 'goal',
+      'asc' | 'desc',
+    ]
+    const filtered = rows.filter((row) => {
+      const canContribute = isLaunchContributable(row, now)
+      if (stateFilter !== 'all' && row.state !== stateFilter) return false
+      if (contributeFilter === 'contributable' && !canContribute) return false
+      if (contributeFilter === 'non-contributable' && canContribute) {
+        return false
+      }
+      if (!deferredSearch) return true
+
+      return [
+        row.tokenName,
+        row.tokenSymbol,
+        row.publicKey,
+        row.baseMint,
+        row.quoteMint,
+      ].some((value) => value?.toLowerCase().includes(deferredSearch))
+    })
+
+    return filtered.sort((a, b) => {
+      const getValue = (row: LaunchRow) => {
+        const raw =
+          sortField === 'goal' ? row.goalAmount : row.totalCommitted
+        return toBigIntSafe(raw) ?? 0n
+      }
+      const delta = getValue(a) - getValue(b)
+      if (delta === 0n) return 0
+      if (sortDir === 'asc') {
+        return delta < 0n ? -1 : 1
+      }
+      return delta > 0n ? -1 : 1
+    })
+  }, [contributeFilter, deferredSearch, now, rows, sort, stateFilter])
+
+  const contributableCount = useMemo(
+    () => rows.filter((row) => isLaunchContributable(row, now)).length,
+    [now, rows],
+  )
+  const visibleRows = sorted.slice(0, visibleCount)
+
+  const getSecondsRemaining = (row: LaunchRow) => {
+    if (
+      !isLaunchContributable(row, now) ||
+      row.launchEndTimestamp === undefined
+    ) {
+      return undefined
     }
-    const delta = getValue(a) - getValue(b)
-    if (delta === BigInt(0)) return 0
-    if (sortDir === 'asc') {
-      return delta < BigInt(0) ? -1 : 1
-    }
-    return delta > BigInt(0) ? -1 : 1
-  })
-
-  const contributableCount = rows.filter((r) => r.canContribute).length
+    return Math.max(0, Math.floor(row.launchEndTimestamp - now))
+  }
 
   return (
     <section className="launch-list">
       <header className="launch-header">
         <span>Launches</span>
-        <span className="muted">
-          {loading ? 'Loading…' : `${filtered.length} shown · ${contributableCount} open for contribution`}
-        </span>
+        <div className="launch-header-actions">
+          <span className="muted">
+            {loading
+              ? 'Loading…'
+              : `Showing ${visibleRows.length} of ${sorted.length} · ${contributableCount} open`}
+          </span>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setReloadNonce((nonce) => nonce + 1)}
+            disabled={loading}
+            title="Reload launches"
+          >
+            ↻ Refresh
+          </button>
+        </div>
       </header>
 
       <div className="launch-filter">
+        <label className="launch-search">
+          Search
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.currentTarget.value)}
+            placeholder="Name, symbol, or address"
+          />
+        </label>
+
         <label>
           Status
           <select
@@ -208,28 +243,17 @@ export const LaunchList = () => {
         </label>
 
         <label>
-          Sort field
+          Sort
           <select
-            value={sortField}
+            value={sort}
             onChange={(event) =>
-              setSortField(event.currentTarget.value as 'goal' | 'raised')
+              setSort(event.currentTarget.value as SortOption)
             }
           >
-            <option value="raised">Raised amount</option>
-            <option value="goal">Goal amount</option>
-          </select>
-        </label>
-
-        <label>
-          Sort direction
-          <select
-            value={sortDir}
-            onChange={(event) =>
-              setSortDir(event.currentTarget.value as 'asc' | 'desc')
-            }
-          >
-            <option value="desc">High → Low</option>
-            <option value="asc">Low → High</option>
+            <option value="raised-desc">Raised · high → low</option>
+            <option value="raised-asc">Raised · low → high</option>
+            <option value="goal-desc">Goal · high → low</option>
+            <option value="goal-asc">Goal · low → high</option>
           </select>
         </label>
       </div>
@@ -239,72 +263,95 @@ export const LaunchList = () => {
       {!loading && sorted.length === 0 && !error ? (
         <p className="muted">No launches detected.</p>
       ) : (
-        <div>
-          {sorted.map((row) => (
-            <article
-              key={row.publicKey}
-              className={`launch-row ${row.canContribute ? 'launch-row--contributable' : ''}`}
-              onClick={() => {
-                console.info('[launches] selected', row.publicKey, row.rawAccount)
-                navigate(`/launch/${row.publicKey}`, { state: row })
-              }}
+        <>
+          <div className="launch-rows">
+            {visibleRows.map((row) => {
+              const canContribute = isLaunchContributable(row, now)
+              const secondsRemaining = getSecondsRemaining(row)
+              const logoURI = safeLogoURI(row.logoURI)
+              const pct = raisePercent(row.totalCommitted, row.goalAmount)
+              return (
+                <button
+                  type="button"
+                  key={row.publicKey}
+                  className={`launch-row ${
+                    canContribute ? 'launch-row--contributable' : ''
+                  }`}
+                  onClick={() => {
+                    navigate(`/launch/${row.publicKey}`, { state: row })
+                  }}
+                >
+                  <div className="launch-name">
+                    <div className="token-avatar">
+                      {logoURI ? (
+                        <img
+                          src={logoURI}
+                          alt=""
+                          loading="lazy"
+                          decoding="async"
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : (
+                        <span>
+                          {(row.tokenSymbol ?? row.tokenName ?? row.baseMint)
+                            .slice(0, 2)
+                            .toUpperCase()}
+                        </span>
+                      )}
+                    </div>
+                    <div>
+                      <div className="launch-title">
+                        {row.tokenSymbol?.trim() ||
+                          row.tokenName?.trim() ||
+                          shortPk(row.baseMint)}
+                        <span className="version-badge">{row.version}</span>
+                      </div>
+                      <div className="muted tiny">
+                        Base {shortPk(row.baseMint)} · Quote{' '}
+                        {shortPk(row.quoteMint)}
+                      </div>
+                      <div className="muted tiny">
+                        Raised {formatUsd(row.totalCommitted)} /{' '}
+                        {formatUsd(row.goalAmount)}
+                        {canContribute && pct !== undefined
+                          ? ` · ${Math.round(pct)}% of goal`
+                          : ''}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="badge-row">
+                    {canContribute && (
+                      <span className="contribute-pill">Open</span>
+                    )}
+                    {secondsRemaining !== undefined && (
+                      <span className="time-remaining">
+                        {formatTimeRemaining(secondsRemaining)}
+                      </span>
+                    )}
+                    {row.isLikelyTest && (
+                      <span className="warning-pill">
+                        Likely a test account
+                      </span>
+                    )}
+                    <span className="muted status">{row.state}</span>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+          {visibleRows.length < sorted.length && (
+            <button
+              type="button"
+              className="btn show-more-button"
+              onClick={() => setVisibleCount((count) => count + PAGE_SIZE)}
             >
-              <div className="launch-name">
-                <div className="token-avatar">
-                  {row.logoURI ? (
-                    <img src={row.logoURI} alt="" />
-                  ) : (
-                    <span>
-                      {(row.tokenSymbol ??
-                        row.tokenName ??
-                        row.baseMint
-                      )
-                        .slice(0, 2)
-                        .toUpperCase()}
-                    </span>
-                  )}
-                </div>
-                <div>
-                  <div className="launch-title">
-                    {row.tokenSymbol?.trim() || row.tokenName?.trim() || shortPk(row.baseMint)}
-                    <span className="version-badge">{row.version}</span>
-                  </div>
-                  <div className="muted tiny">
-                    Base {shortPk(row.baseMint)} · Quote {shortPk(row.quoteMint)}
-                  </div>
-                  <div className="muted tiny">
-                    Raised {formatUsd(row.totalCommitted)} / {formatUsd(row.goalAmount)}
-                  </div>
-                </div>
-              </div>
-              <div className="badge-row">
-                {row.canContribute && (
-                  <span className="contribute-pill">Open</span>
-                )}
-                {row.secondsRemaining !== undefined && row.secondsRemaining > 0 && (
-                  <span className="time-remaining">
-                    {formatTimeRemaining(row.secondsRemaining)}
-                  </span>
-                )}
-                {row.isLikelyTest && (
-                  <span className="warning-pill">Likely a test account</span>
-                )}
-                <span className="muted status">{row.state}</span>
-              </div>
-            </article>
-          ))}
-        </div>
+              Show {Math.min(PAGE_SIZE, sorted.length - visibleRows.length)} more
+            </button>
+          )}
+        </>
       )}
-
     </section>
   )
-}
-
-type LaunchAccount = Record<string, any>
-
-type LaunchAccountEntry = {
-  publicKey: PublicKey | string
-  account: LaunchAccount | undefined
 }
 
 const formatTimeRemaining = (seconds: number): string => {
@@ -315,70 +362,4 @@ const formatTimeRemaining = (seconds: number): string => {
   if (days > 0) return `${days}d ${hours}h left`
   if (hours > 0) return `${hours}h ${mins}m left`
   return `${mins}m left`
-}
-
-const mapLaunchEntry = (
-  entry: LaunchAccountEntry,
-  version: LaunchVersion,
-): LaunchRow => {
-  const account: LaunchAccount = entry.account ?? {}
-  const pk: PublicKey | string = entry.publicKey
-  const baseMint =
-    account.baseMint?.toBase58?.() ??
-    account.tokenMint?.toBase58?.() ??
-    String(account.baseMint ?? account.tokenMint ?? '')
-  const quoteMint =
-    account.quoteMint?.toBase58?.() ??
-    account.usdcMint?.toBase58?.() ??
-    String(account.quoteMint ?? account.usdcMint ?? '')
-
-  const state = deriveLaunchState(account.state as Record<string, unknown>)
-  const totalCommitted = toLamportString(account.totalCommittedAmount)
-  const goalAmount =
-    toLamportString(account.minimumRaiseAmount) ??
-    toLamportString(account.finalRaiseAmount)
-  const acceptedAmount = toLamportString(account.finalRaiseAmount)
-
-  const goalBig = toBigIntSafe(goalAmount)
-  const totalBig = toBigIntSafe(totalCommitted)
-  const isLikelyTest =
-    (goalBig !== null && goalBig < MIN_GOAL_THRESHOLD) ||
-    (totalBig !== null && totalBig < MIN_RAISED_THRESHOLD)
-
-  // Calculate if launch can be contributed to
-  const canContribute = state === 'live'
-
-  // Calculate seconds remaining if live
-  let secondsRemaining: number | undefined
-  if (state === 'live') {
-    const unixTimestampStarted = account.unixTimestampStarted
-    const secondsForLaunch = account.secondsForLaunch
-
-    if (unixTimestampStarted && secondsForLaunch) {
-      const startedAt = typeof unixTimestampStarted === 'object' && 'toNumber' in unixTimestampStarted
-        ? unixTimestampStarted.toNumber()
-        : Number(unixTimestampStarted)
-      const duration = typeof secondsForLaunch === 'object' && 'toNumber' in secondsForLaunch
-        ? secondsForLaunch.toNumber()
-        : Number(secondsForLaunch)
-      const endTime = startedAt + duration
-      const now = Math.floor(Date.now() / 1000)
-      secondsRemaining = Math.max(0, endTime - now)
-    }
-  }
-
-  return {
-    publicKey: typeof pk === 'string' ? pk : pk.toBase58(),
-    baseMint,
-    quoteMint,
-    version,
-    state,
-    totalCommitted,
-    goalAmount,
-    acceptedAmount,
-    isLikelyTest,
-    canContribute,
-    secondsRemaining,
-    rawAccount: serializeAccount(account) as Record<string, unknown>,
-  }
 }
